@@ -1,0 +1,143 @@
+---
+title: "Problem Set 4"
+author: "Owen Delumpa"
+date: today
+format:
+  html:
+    toc: true
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+**GitHub repo:** <https://github.com/odelumpa/ec422_ps4_Delumpa>
+
+```{r}
+#| echo: false
+library(tidyquant)
+library(tidyverse)
+library(fpp3)
+library(BVAR)
+```
+
+2.1a
+
+```{r}
+liquor_raw <- read_csv(
+  "data/MRTSSM4453USN.csv",
+  na = ".",
+  col_types = cols(
+    observation_date = col_date(format = "%Y-%m-%d"),
+    MRTSSM4453USN = col_double()
+  )
+)
+
+liquor <- liquor_raw |>
+  transmute(Month = yearmonth(observation_date), sales = MRTSSM4453USN) |>
+  as_tsibble(index = Month) |>
+  filter(Month <= yearmonth("2019 Dec"))
+
+has_gaps(liquor)
+```
+
+2.1b
+
+```{r}
+liquor |>
+  autoplot(sales) +
+  labs(
+    title = "Retail Sales at Beer, Wine, and Liquor Stores",
+    x = NULL, y = "Millions of dollars"
+  ) +
+  theme_minimal()
+
+liquor |>
+  gg_season(log(sales)) +
+  labs(
+    title = "Seasonal Pattern in Liquor Store Sales",
+    x = NULL, y = "log(Sales)"
+  ) +
+  theme_minimal()
+```
+
+Liquor sales grew from around \$1.4 billion in January 1992 to around \$6 billion in December 2019. The seasonal pattern shows that liquor sales are highest in December and lowest in January and this is consistent through the years.
+
+2.2a
+
+```{r}
+liquor_fit <- liquor |>
+  model(arima = ARIMA(log(sales)),
+        ets   = ETS(log(sales)))
+
+liquor_fit |> select(arima) |> report()
+liquor_fit |> select(ets) |> report()
+```
+
+R got an ARIMA(1,0,2)(2,1,1)\[12\] with drift for log sales and an ETS(A,A,A). There is no first difference as d=0, but there is a seasonal difference as D=1; therefore, it models the change in log sales from the same month last year. For ETS, the first A means the errors are additive, the second one means the trend is additive, and the third one means the seasonal component is additive, and the third one means it has an additive seasonal pattern. The ARIMA model has an AICc of 1037.2 and the ETS model has an AICc of 1040.3, so the ARIMA model is preferred.
+
+2.2b
+
+```{r}
+liquor_fit |> select(arima) |> gg_tsresiduals()
+
+liquor_fit |>
+  select(arima) |>
+  augment() |>
+  features(.innov, ljung_box, lag = 24, dof = 6)
+```
+
+The residuals of the ARIMA model do not appear to be white noise. The time plot kind of moves all around zero without having a specific patter, but the ACF plot shows that there are some significant spikes. The Ljung-Box test also shows that the p-value is less than 0.05, so we reject the null hypothesis that the residuals are white noise.
+
+2.3a
+
+```{r}
+liquor_cv <- liquor |>
+  stretch_tsibble(.init = 120, .step = 1) |>
+  filter(.id < max(.id))
+
+liquor_cv_fit <- liquor_cv |>
+  model(snaive = SNAIVE(sales),
+        ets    = ETS(log(sales)),
+        arima  = ARIMA(log(sales)))
+
+saveRDS(liquor_cv_fit, "results/liquor_cv_fit.rds")
+
+n_distinct(liquor_cv$.id)
+```
+
+The TS-CV uses 216 forecast origins because the last of the 217 training samples is dropped.
+
+2.3b
+
+```{r}
+liquor_cv_fc <- liquor_cv_fit |>
+  forecast(h = 1)
+
+liquor_cv_fc |>
+  accuracy(liquor, measures = list(RMSE = RMSE, MAE = MAE)) |>
+  knitr::kable(digits = 2)
+
+range(liquor_cv_fc$Month)
+```
+
+Forecasts ryn frim January 2002 to December of 2019. The ARIMA model shows the most accurate forecast with an RMSE of 81.43, an MAE of 65.65, ETS reads 94.35 and 72.31, and the seasonal random walk is 161.26 and 136.63.
+
+2.4
+
+```{r}
+liquor_errs <- liquor_cv_fc |>
+  as_tibble() |>
+  left_join(as_tibble(liquor) |> select(Month, actual = sales),
+            by = "Month") |>
+  mutate(e = actual - .mean) |>
+  select(Month, .model, e) |>
+  pivot_wider(names_from = .model, values_from = e)
+
+forecast::dm.test(liquor_errs$arima, liquor_errs$ets, h = 1, power = 2)
+
+forecast::dm.test(liquor_errs$arima, liquor_errs$snaive, h = 1, power = 2)
+```
+
+Our DM statistic we got was -2.91 and a p-value of 0.004 when we compared ARIMA with ETS and when we compare with ARIMA with the seasonal walk it gives us a DM stat of -10.76 and a p-value of 2.2e-16. Both p-values are well below 0.05 and both stats are below 0 so ARIMA's forecasts make more sense than the other 2 tests. So, I would go with the ARIMA model if I were the liquor store.
+
